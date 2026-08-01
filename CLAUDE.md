@@ -316,6 +316,36 @@ CPUバックエンドのみを実装。
 [`open-raid-z`のCLAUDE.md](https://github.com/aon-co-jp/open-raid-z/blob/main/CLAUDE.md)
 「関連プロジェクト」節を参照。
 
+## HANDOFF追記(2026-07-31続き2) VPS実デプロイ完了
+
+前項「次にすべきこと(1)」への対応。
+
+1. VPS(`ssh conoha`)に`/root/rs-link-fusion`(このリポジトリ)・
+   `/root/open-cuda`(空だったため`git clone`し直し)を配置、
+   `cargo build --release`成功(依存の`RS-SmartTCP`・`open-cuda`は
+   既にVPS上に存在)。
+2. `rs-link-fusion-landing.service`(systemd)を新設し、
+   `rs-linkfusion landing --bind 127.0.0.1:8600`を常駐化
+   (`RS_LINKFUSION_POWER_PROFILE=power-saving`)。
+3. `/root/open-web-server/domains.toml`に`easy-web.tokyo`+
+   `path_prefix=/rs-link-fusion`・`/rs-link-fusion/demo`
+   (いずれも同一バックエンド`127.0.0.1:8600`へのエイリアス、
+   `open-redmine`の`/demo`と同じ設計)を追記、`open-web-server`を
+   再起動して反映。
+4. **実機検証**: `curl https://easy-web.tokyo/rs-link-fusion/`→`200`・
+   `<title>RS-Link-Fusion</title>`、`curl https://easy-web.tokyo/
+   rs-link-fusion/demo`→`200`をいずれも実際のHTTPS経由で確認した。
+5. **正直な開示**: デモ環境は本番と同一バックエンドへのエイリアスの
+   ままで、独立したデータセットは無い(`open-redmine`のデモ環境と
+   同じ制約)。このバイナリ自体はまだ`serve`/`connect`/`gateway-*`の
+   実運用(ボンディング本体)をVPS上で稼働させていない
+   ——今回デプロイしたのは`landing`サブコマンド(ダウンロード案内
+   ページ)のみ。
+  - 次にすべきこと: (1) Android対応(`open-raid-z/CLAUDE.md`の
+    エコシステム横断優先方針に従う)、(2) `low_memory`単体の実メモリ
+    削減実装、(3) ボンディング本体機能の実運用(GitHub Releasesでの
+    バイナリ配布、実ユーザーによるserve/connect運用開始)。
+
 ## HANDOFF追記(2026-07-31続き) リポジトリ改名+電源プロファイル選択機能を実装+GitHub管理/デモページ設置
 
 ユーザー指示の連続対応:「RS-LinkFusion→RS-Link-Fusion/rs-link-fusionへ

@@ -18,6 +18,7 @@ mod accel;
 mod framed;
 #[cfg(feature = "gui")]
 mod gui;
+mod landing;
 mod qos;
 mod quality;
 mod speedtest;
@@ -253,6 +254,18 @@ enum Command {
     },
     /// GUIウィンドウを起動する(「速度測定」ボタン等)。`gui` feature必須。
     Gui,
+    /// ダウンロード案内・電源プロファイル説明ページ(`static/landing.html`)
+    /// を配信する最小限のHTTPサーバー(2026-07-31追加)。`open-web-server`
+    /// 配下にパスプレフィックス付きでマウントされる想定
+    /// (`open-redmine`の`web/src/lib.rs`の`BASE_PATH`と同種の罠を踏まない
+    /// よう、このサーバー自体はプレフィックスを意識せず常に同じHTMLを
+    /// 返す静的配信のみ——リンク先はすべて絶対URL/ドメイン相対で埋め込み
+    /// 済み)。
+    Landing {
+        /// 待ち受けアドレス(例: 0.0.0.0:8600)
+        #[arg(long, env = "RS_LINKFUSION_LANDING_BIND", default_value = "127.0.0.1:8600")]
+        bind: SocketAddr,
+    },
 }
 
 #[derive(Subcommand)]
@@ -377,6 +390,7 @@ async fn async_main(command: Command, power_profile: PowerProfile) -> Result<()>
             run_gateway_connect(remote, remote_port, tun_addr, tun_prefix, mtu, key, qos, accel).await?;
         }
         Command::SpeedTest { command } => run_speedtest_command(command).await?,
+        Command::Landing { bind } => landing::run(bind).await?,
         Command::Gui => {
             #[cfg(feature = "gui")]
             {

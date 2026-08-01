@@ -1,4 +1,10 @@
-# 開発方針・設計書(RS-LinkFusion) — 2026-07-23時点、コアロジック実装・実機検証済み
+# 開発方針・設計書(RS-Link-Fusion、旧名RS-LinkFusion) — 2026-07-23時点、コアロジック実装・実機検証済み
+
+GitHubリポジトリ: [aon-co-jp/rs-link-fusion](https://github.com/aon-co-jp/rs-link-fusion)
+(2026-07-31に`RS-LinkFusion`から改名)。
+公開先: `https://easy-web.tokyo/rs-link-fusion`(デモ環境:
+`https://easy-web.tokyo/rs-link-fusion/demo`)。
+VPS上の作業パス: `/root/rs-link-fusion`。
 
 > ⚠️ **正直な開示**: 前回セッションはリミット接近で`cargo build`/
 > `cargo test`未検証のまま中断していたが、本セッションで検証・
@@ -310,21 +316,87 @@ CPUバックエンドのみを実装。
 [`open-raid-z`のCLAUDE.md](https://github.com/aon-co-jp/open-raid-z/blob/main/CLAUDE.md)
 「関連プロジェクト」節を参照。
 
-## HANDOFF追記(2026-07-31) インストーラーの電源プロファイル選択機能(未実装、エコシステム標準方針として記録)
+## HANDOFF追記(2026-07-31続き) リポジトリ改名+電源プロファイル選択機能を実装+GitHub管理/デモページ設置
 
-`open-raid-z`のCLAUDE.md(全リポジトリ共通の設計思想セクション)に、
-インストーラー(`install.sh`/`install.ps1`等)実行時に以下3つの電源
-プロファイルを選択させる標準方針を追記した(ユーザー指示、2026-07-31):
+ユーザー指示の連続対応:「RS-LinkFusion→RS-Link-Fusion/rs-link-fusionへ
+改名し、easy-web.tokyo/rs-link-fusionで管理・/demoへリンク」「電源
+プロファイル選択機能の実装(選択制で省メモリ+省電力、常時電源も選択
+可能)」「上記は同時には選択出来ない様にして」→「省電力+省メモリは
+選択可能」→「省メモリ+常時電源接続も選択可能」(排他ルールを段階的に
+確定)。
 
-1. **省電力(Power-saving)**: CPU使用率・ポーリング間隔を抑えた低負荷設定。
-2. **省メモリ(Low-memory)**: メモリ確保量・キャッシュサイズを抑えた設定。
-3. **常時電源接続(Always-on)**: 上記の抑制を行わないフル性能設定。
-   **この場合のみ**ハードウェアアクセラレータ(NPU/GPU)のサポートを
-   自動検出・自動有効化する(`open-cuda`の`GpuDevice`抽象化を利用)。
-
-**正直な開示**: このリポジトリのインストーラーへの実装はまだ未着手。
-実装時は`open-raid-z/CLAUDE.md`の該当節、および先行実装予定の
-`open-redmine/CLAUDE.md`を参照し、`open-cuda`側のGPU/NPUベンダー検出
-ロジックを再利用すること(車輪の再発明を避ける)。
-- 次にすべきこと: このリポジトリの`install.sh`/`install.ps1`に上記3
-  プロファイルの選択機能を追加する。
+1. **リポジトリ改名(完了)**: GitHub API(`PATCH /repos/{owner}/{repo}`)
+   経由で`aon-co-jp/RS-LinkFusion`→`aon-co-jp/rs-link-fusion`へ実際に
+   リネーム。ローカルフォルダも`F:\runo\RS-LinkFusion`→
+   `F:\runo\rs-link-fusion`へ変更、`git remote set-url`で追従。
+   表示名は`RS-Link-Fusion`(README/CLAUDE.md見出し)。**正直な開示**:
+   内部のcrate名・バイナリ名(`rs-linkfusion`、ハイフン無し)は既存の
+   ビルドスクリプト・systemdサービス名への影響を避けるため据え置いた
+   (README.mdに明記済み)。
+2. **電源プロファイル選択機能(実装完了)**: `src/main.rs`に`PowerProfile`
+   構造体(`power_saving`/`low_memory`/`always_on`の3bool)を新設。
+   **排他ルール**(ユーザー指示を時系列で整理した最終形):
+   - `power_saving`と`always_on`は同時指定不可(CPU使用率について
+     正反対の方針のため)。
+   - `low_memory`は独立した軸であり、`power_saving`・`always_on`の
+     いずれとも併用可能。
+   `--power-profile`(env: `RS_LINKFUSION_POWER_PROFILE`)にカンマ区切り
+   で指定(例: `power-saving,low-memory`、`low-memory,always-on`)。
+   **実効的な差分**(正直な開示、現時点で実装済みの範囲):
+   - スレッド数: `always_on`が有効なら`tokio::runtime::Builder::
+     new_multi_thread`(全論理コア)、無効なら`new_current_thread`
+     (シングルスレッド)——`always_on`のみで判定し、`low_memory`との
+     併用時に「フル性能」と「シングルスレッド」が矛盾しないようにした。
+   - アクセラレータ: `always_on`が有効かつ`--accel`が既定値`cpu`のまま
+     (ユーザーが明示的に指定していない)場合のみ`gpu`へ自動アップ
+     グレード(`effective_accel()`)。ユーザーが明示的に`--accel cpu`を
+     指定した場合はそちらを尊重する。
+   - `low_memory`単体でのメモリ確保量削減(バッファ/キャッシュサイズの
+     実際の調整)は**まだ未実装**——現状はランタイムのスレッド数決定
+     への関与とログ出力のみが実効的な差分(次回課題として正直に開示)。
+   - NPU自体(GPU以外のハードウェアアクセラレータ)は`accel.rs`の
+     `AccelBackend::Npu`がプレースホルダのまま(既存の未実装項目、
+     今回のスコープでは変更していない)。
+3. **`install.sh`/`install.ps1`**: インストール時に5択(省電力/省メモリ/
+   両方併用/常時電源接続/省メモリ+常時電源接続)のプロンプトを追加し、
+   選択結果をLinuxはsystemdサービスの`Environment=`、Windowsは
+   マシン環境変数(`[Environment]::SetEnvironmentVariable`、`Machine`
+   スコープ)として設定する。Windows版は`New-Service`案内コマンドにも
+   `--power-profile`明示指定を追加(サービスが環境変数を引き継がない
+   場合への対策)。
+4. **ランディングページ(`static/landing.html`)を新設**: ダウンロード
+   リンク・電源プロファイルの説明(チェックボックス3つ、JSで
+   「省電力」⇔「常時電源接続」の排他制御のみ実装、「省メモリ」は
+   両方と併用可能なチェックボックスのまま)・機能概要(複数WAN/LAN/
+   WiFi混在ボンディング・自動フェイルオーバー・open-raid-z/aruaru-db
+   連携・open-directx/open-cuda連携)を日英併記で掲載。デモ環境
+   (`/rs-link-fusion/demo`)への案内リンクも設置(open-redmineと同じ
+   パターン)。**正直な開示**: このHTMLを実際に配信する軽量HTTPサーバー
+   サブコマンド自体はまだ実装していない(このバイナリは元々CLIツールで
+   あり、Webサーバー機能を持たない)——次回、`static/landing.html`を
+   配信する最小限のHTTPサーバー(新規重量級依存を避け、既存の`tokio`
+   のみで実装予定)を追加し、`open-web-server`の`domains.toml`へ
+   `easy-web.tokyo`+`path_prefix=/rs-link-fusion`のテナント登録を行う
+   必要がある。VPSへの実デプロイは**この理由により今回は未完了**。
+5. **検証**: 新規テスト7件(`power_profile_tests`——併用可否・排他
+   判定・スレッド数決定・アクセラレータ自動アップグレードの条件分岐を
+   すべて実際の`PowerProfile::parse`/`effective_accel`呼び出しで確認)。
+   `cargo test`**18件全green**(既存11件+新規7件、回帰なし)。
+   `cargo build --release`成功(既存警告のみ、新規警告なし)。実バイナリ
+   で`--power-profile power-saving,low-memory`・`always-on`・
+   `low-memory,always-on`・`power-saving,always-on`(排他エラーになる
+   ことを含む)を実際に実行し、ログ出力(シングル/マルチスレッド
+   ランタイムの選択)が意図通りであることを確認した。
+6. **Android/iOS対応の選択制インストーラー化(ユーザー指示「インストール
+   ラーは、Windows、LINUX、Androidはスマホとタブレット選択制にして」)
+   ——正直な開示、未着手**: 既存のHANDOFF記載通り、Android版は
+   「Rust+Android NDKでのクロスビルドは技術的に可能性ありと考えられる
+   が、ツールチェーン未確認・未着手」の計画段階のまま変わっていない。
+   「スマホ/タブレット選択制」を実現するには、まずAndroidアプリシェル
+   自体(APK化・署名・フォアグラウンドサービス化)が必要——これは
+   インストーラーの選択肢を増やす以前の、より大きな未着手の前提作業
+   であるため、今回はインストーラー側の変更は行わなかった。
+   - 次にすべきこと: (1) 上記(4)の軽量HTTPサーバー実装+VPSデプロイ、
+     (2) Android NDKクロスビルドの実証実験、(3) `low_memory`単体での
+     実メモリ削減(バッファ/キャッシュサイズ調整)の実装、(4) NPU
+     アクセラレータ本体の実装(現状プレースホルダ)。

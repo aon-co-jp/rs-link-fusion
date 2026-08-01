@@ -1,6 +1,16 @@
-# RS-LinkFusion
+# RS-Link-Fusion
+
+(旧名`RS-LinkFusion`→2026-07-31に`rs-link-fusion`〈GitHubリポジトリ名〉/
+`RS-Link-Fusion`〈表示名〉へ改名。内部のcrate名・バイナリ名
+〈`rs-linkfusion`〉は既存のインストール環境・ビルドスクリプトへの影響を
+避けるため据え置き——正直な開示)
 
 **開発開始日: 2026-07-23**(このリポジトリのGitHub作成日)
+
+## Deployment / 運用先
+
+- **Production/admin (本番/管理者用)**: <https://easy-web.tokyo/rs-link-fusion/>
+- **Demo (デモ用)**: <https://easy-web.tokyo/rs-link-fusion/demo>
 
 複数のWAN/LAN/WiFi(古い規格〜WiFi 7まで、OSがネットワークインター
 フェースとして認識するものはすべて対象)を1つの論理接続へ束ね

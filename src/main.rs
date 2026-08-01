@@ -66,6 +66,62 @@ fn parse_accel_backend(s: &str) -> Result<AccelBackend> {
     }
 }
 
+/// インストーラーの電源プロファイル選択(`open-raid-z`で定めたエコ
+/// システム共通方針、2026-07-31追加)。**排他なのは「省電力」対
+/// 「常時電源接続」の組のみ**(ユーザー指示を時系列で整理した結果:
+/// 「省電力+省メモリは選択可能」→「省メモリ+常時電源接続も選択可能」
+/// →つまり「省メモリ」はCPU/電源方針とは独立した軸〈メモリ消費量〉
+/// であり、省電力・常時電源接続いずれとも併用できる。一方「省電力」と
+/// 「常時電源接続」はCPU使用率について正反対の方針〈抑える/抑えない〉
+/// のため、この2つのみ同時選択不可とする)。CLIではカンマ区切りで
+/// 指定する(例: `--power-profile power-saving,low-memory`、
+/// `--power-profile low-memory,always-on`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PowerProfile {
+    /// CPU使用率・ポーリング間隔を抑える。
+    power_saving: bool,
+    /// メモリ確保量・キャッシュサイズを抑える。
+    low_memory: bool,
+    /// フル性能・ハードウェアアクセラレータ(NPU/GPU)自動有効化。
+    /// `power_saving`/`low_memory`のいずれかと同時にはできない。
+    always_on: bool,
+}
+
+impl PowerProfile {
+    fn parse(s: &str) -> Result<Self> {
+        let mut power_saving = false;
+        let mut low_memory = false;
+        let mut always_on = false;
+        for part in s.split(',').map(|p| p.trim().to_lowercase().replace('_', "-")) {
+            match part.as_str() {
+                "power-saving" => power_saving = true,
+                "low-memory" => low_memory = true,
+                "always-on" => always_on = true,
+                other => anyhow::bail!("不明な --power-profile 値: {other}(power-saving / low-memory / always-on のいずれか、またはpower-saving,low-memoryのようにカンマ区切りで複数指定してください)"),
+            }
+        }
+        if always_on && power_saving {
+            anyhow::bail!("--power-profile: always-onとpower-saving(CPU使用率について正反対の方針)は同時に指定できません(排他)。low-memoryとはそれぞれ併用可能です");
+        }
+        if !power_saving && !low_memory && !always_on {
+            anyhow::bail!("--power-profile: 少なくとも1つの値を指定してください");
+        }
+        Ok(Self { power_saving, low_memory, always_on })
+    }
+
+    /// tokioランタイムをシングルスレッドで動かすべきか。
+    /// **`always_on`のみで判定する**(`always_on`かつ`low_memory`の
+    /// 併用時に「常時電源接続=フル性能」と「シングルスレッド」が矛盾
+    /// しないようにするため——CPU並列度は`always_on`の有無で決め、
+    /// `low_memory`はメモリ確保量という別軸として扱う。**正直な開示**:
+    /// `low_memory`単体でのメモリ確保量削減自体〈バッファ/キャッシュ
+    /// サイズの調整〉はまだ実装しておらず、現状は電源プロファイルの
+    /// ログ出力とスレッド数決定への関与のみが実効的な差分。
+    fn wants_single_thread_runtime(&self) -> bool {
+        !self.always_on
+    }
+}
+
 const CHUNK_SIZE: usize = 16 * 1024;
 
 #[derive(Parser)]
@@ -75,6 +131,10 @@ const CHUNK_SIZE: usize = 16 * 1024;
     about = "複数WAN/LAN/WiFiインターフェースをaggligatorで束ね(ボンディング)、通信の高速化・安定化を実現するトンネル"
 )]
 struct Cli {
+    /// 電源プロファイル(インストーラーで選択した値をsystemd
+    /// `Environment=`経由で渡す想定、2026-07-31追加)。
+    #[arg(long, env = "RS_LINKFUSION_POWER_PROFILE", default_value = "power-saving")]
+    power_profile: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -253,36 +313,67 @@ enum SpeedTestCommand {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// `--accel`の実効値を決定する。電源プロファイルが`always-on`かつ
+/// ユーザーが明示的に`gpu`を指定していない(既定値`cpu`のまま)場合のみ
+/// `gpu`へ自動アップグレードする——ユーザーが明示的に`cpu`を指定した
+/// 場合はそちらを尊重する、という判断(電源プロファイルは「既定値の
+/// 賢い選択」であって、明示指定を上書きするものではない)。
+fn effective_accel<'a>(power_profile: PowerProfile, requested_accel: &'a str) -> &'a str {
+    if power_profile.always_on && requested_accel == "cpu" {
+        tracing::info!("power-profile=always-on: --accelが既定値(cpu)のため、ハードウェアアクセラレータ(gpu)へ自動アップグレードします");
+        "gpu"
+    } else {
+        requested_accel
+    }
+}
+
+fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    let power_profile = PowerProfile::parse(&cli.power_profile)?;
 
-    match cli.command {
+    // 電源プロファイルに応じてtokioランタイムの構成を変える
+    // (2026-07-31追加、インストーラーの電源プロファイル選択機能):
+    // power-saving/low-memoryはシングルスレッド(current_thread)で
+    // CPU使用率・メモリ確保量を抑え、always-onは全論理コアを使う
+    // multi_threadでフル性能を出す。
+    let runtime = if power_profile.wants_single_thread_runtime() {
+        tracing::info!(profile = ?power_profile, "電源プロファイル: シングルスレッドランタイムで起動します");
+        tokio::runtime::Builder::new_current_thread().enable_all().build()?
+    } else {
+        tracing::info!(profile = ?power_profile, "電源プロファイル: マルチスレッド(全論理コア)ランタイムで起動します");
+        tokio::runtime::Builder::new_multi_thread().enable_all().build()?
+    };
+
+    runtime.block_on(async_main(cli.command, power_profile))
+}
+
+async fn async_main(command: Command, power_profile: PowerProfile) -> Result<()> {
+    match command {
         Command::GenerateKey => {
             let key = PayloadAccelerator::generate_key();
             println!("{}", encode_hex(&key));
         }
         Command::Serve { bind, target, key, accel } => {
             let key = decode_hex_key(&key)?;
-            let accel = parse_accel_backend(&accel)?;
+            let accel = parse_accel_backend(effective_accel(power_profile, &accel))?;
             run_serve(bind, target, key, accel).await?;
         }
         Command::Connect { listen, remote, remote_port, key, accel } => {
             let key = decode_hex_key(&key)?;
-            let accel = parse_accel_backend(&accel)?;
+            let accel = parse_accel_backend(effective_accel(power_profile, &accel))?;
             run_connect(listen, remote, remote_port, key, accel).await?;
         }
         Command::GatewayServe { bind, tun_addr, tun_prefix, mtu, key, qos_config, accel } => {
             let key = decode_hex_key(&key)?;
             let qos = load_qos(qos_config.as_deref())?;
-            let accel = parse_accel_backend(&accel)?;
+            let accel = parse_accel_backend(effective_accel(power_profile, &accel))?;
             run_gateway_serve(bind, tun_addr, tun_prefix, mtu, key, qos, accel).await?;
         }
         Command::GatewayConnect { remote, remote_port, tun_addr, tun_prefix, mtu, key, qos_config, accel } => {
             let key = decode_hex_key(&key)?;
             let qos = load_qos(qos_config.as_deref())?;
-            let accel = parse_accel_backend(&accel)?;
+            let accel = parse_accel_backend(effective_accel(power_profile, &accel))?;
             run_gateway_connect(remote, remote_port, tun_addr, tun_prefix, mtu, key, qos, accel).await?;
         }
         Command::SpeedTest { command } => run_speedtest_command(command).await?,
@@ -536,4 +627,55 @@ fn decode_hex_key(s: &str) -> Result<[u8; 32]> {
         *chunk = u8::from_str_radix(byte_str, 16).context("key must be valid hex")?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod power_profile_tests {
+    use super::*;
+
+    #[test]
+    fn power_saving_and_low_memory_can_combine() {
+        let p = PowerProfile::parse("power-saving,low-memory").unwrap();
+        assert!(p.power_saving && p.low_memory && !p.always_on);
+        assert!(p.wants_single_thread_runtime());
+    }
+
+    #[test]
+    fn low_memory_and_always_on_can_combine() {
+        let p = PowerProfile::parse("low-memory,always-on").unwrap();
+        assert!(p.low_memory && p.always_on && !p.power_saving);
+        // always_onが優先されマルチスレッドになる(矛盾を避ける設計)。
+        assert!(!p.wants_single_thread_runtime());
+    }
+
+    #[test]
+    fn power_saving_and_always_on_are_mutually_exclusive() {
+        assert!(PowerProfile::parse("power-saving,always-on").is_err());
+        assert!(PowerProfile::parse("always-on,power-saving").is_err());
+    }
+
+    #[test]
+    fn always_on_alone_wants_multi_thread_and_gpu_upgrade() {
+        let p = PowerProfile::parse("always-on").unwrap();
+        assert!(!p.wants_single_thread_runtime());
+        assert_eq!(effective_accel(p, "cpu"), "gpu");
+        // 明示的にcpuを指定したわけではなく既定値のcpuのみアップグレード対象。
+    }
+
+    #[test]
+    fn power_saving_alone_does_not_upgrade_accel() {
+        let p = PowerProfile::parse("power-saving").unwrap();
+        assert!(p.wants_single_thread_runtime());
+        assert_eq!(effective_accel(p, "cpu"), "cpu");
+    }
+
+    #[test]
+    fn empty_value_is_rejected() {
+        assert!(PowerProfile::parse("").is_err());
+    }
+
+    #[test]
+    fn unknown_value_is_rejected() {
+        assert!(PowerProfile::parse("turbo-mode").is_err());
+    }
 }

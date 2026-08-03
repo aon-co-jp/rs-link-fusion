@@ -144,6 +144,44 @@ CPUバックエンドのみを実装。
 
 ## HANDOFF
 
+- **2026-08-01 Android NDKクロスビルド可否を実証(ユーザー指示「Android
+  対応・複数ドメインバイナリ共有等の残りの横断バックログを行なう」、
+  `open-raid-z/CLAUDE.md`の段階的着手方針「2. まだNDKクロスビルド自体を
+  試していないリポジトリは、まずビルド可否の実証から着手する」に対応)**:
+  `cargo ndk -t aarch64-linux-android build --release`を実際に実行した
+  結果、**ビルドは失敗する**ことを確認した——`open-redmine`/`aruaru-db`
+  のようにそのまま成功するケースとは異なる、正直な開示。
+  1. **エラー内容**: `src/tun_gateway.rs`が`tun_rs::DeviceBuilder`
+     (TUNインターフェースの作成・設定を行う高レベルAPI)を使っているが、
+     `tun-rs`クレートの`src/platform/`配下には`linux`/`macos`/`windows`/
+     `freebsd`/`openbsd`/`netbsd`/`apple`はあるが**`android`が無く**、
+     `DeviceBuilder`自体がAndroidターゲットではコンパイルされない。
+  2. **根本原因(`tun-rs`のソースを実際に読んで特定、推測ではない)**:
+     Androidのセキュリティモデルは、一般アプリが`/dev/tun`のような
+     TUNデバイスを直接オープン・作成することを許可しない——TUN機能を
+     使うには`VpnService`(Android標準API)がユーザーに許可ダイアログを
+     出した上でファイルディスクリプタ(FD)を払い出し、アプリはその
+     FDを受け取って読み書きするだけ、という全く異なるモデルになる。
+     `tun-rs`はこのAndroid固有のFD受け渡しモデルを`DeviceBuilder`
+     (Linuxデスクトップ同様「自分でインターフェースを作る」前提のAPI)
+     ではサポートしていない。
+  3. **完全に不可能ではない(次回以降の設計課題として記録)**:
+     `src/platform/unix/tun.rs`を読むと、`#[cfg(any(target_os = "linux",
+     target_os = "android"))]`という低レベルAPI(既存のFDをラップする
+     形の`Tun`構造体メソッド群)は実際に存在する——`DeviceBuilder`が
+     使えないだけで、クレート自体がAndroidを一切想定していないわけでは
+     ない。真にAndroid対応するには、(a) Kotlinネイティブアプリシェルで
+     `VpnService`を実装しユーザー許可を得てFDを取得、(b) JNI経由で
+     そのFDをRust側へ渡し、`tun_gateway.rs`を「`DeviceBuilder`で新規
+     作成」ではなく「既存FDをラップする」経路に書き換える、という
+     大掛かりな設計変更が必要——open-redmine/aruaru-db版のような
+     「疎通確認+ブラウザ起動」の薄いシェルでは済まない規模。
+  - 次にすべきこと: (1) `VpnService`+JNI FD受け渡しによる本格的な
+    Android対応(規模の大きい別プロジェクトとして計画すべき)、
+    (2) 上記が困難な場合、Android版は「PC側でボンディングしたトンネルへ
+    モバイル回線からアクセスするだけのクライアント」等、TUN層を持たない
+    縮小スコープでの対応可否を検討する。
+
 - **2026-07-24 open-web-serverとの連携を実機検証(結論: 追加のコード変更は
   不要)**: `open-web-server`側からの要望「同一PCに両方インストールし、
   複数回線をボンディングした上でWebサーバーを動かす」シナリオを検証。

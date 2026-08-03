@@ -22,6 +22,7 @@ mod landing;
 mod qos;
 mod quality;
 mod speedtest;
+#[cfg(feature = "tun-gateway")]
 mod tun_gateway;
 
 use accel::{AccelBackend, PayloadAccelerator};
@@ -189,6 +190,9 @@ enum Command {
     },
     /// TUNゲートウェイ・リモート側(典型的にはLinux VPS)。IPフォワーディング/
     /// NAT(MASQUERADE)の有効化は自動で行わない(README.md参照、手動設定が必要)。
+    /// `tun-gateway`feature必須(Androidクロスビルドでは`tun-rs`が
+    /// `DeviceBuilder`をサポートしないため既定で無効化される、2026-08-03追記)。
+    #[cfg(feature = "tun-gateway")]
     GatewayServe {
         /// ボンディング接続の受け付けアドレス(例: 0.0.0.0:5900)
         #[arg(long, env = "RS_LINKFUSION_BIND")]
@@ -220,6 +224,8 @@ enum Command {
     /// TUNゲートウェイ・ローカル側(Windows等)。管理者権限、Windowsでは
     /// `wintun.dll`が実行ファイルと同じディレクトリに必要(README.md参照)。
     /// デフォルトルートのTUN経由への切り替えは自動で行わない。
+    /// `tun-gateway`feature必須(2026-08-03追記、上記`GatewayServe`参照)。
+    #[cfg(feature = "tun-gateway")]
     GatewayConnect {
         /// 接続先ホスト名/IPアドレス(カンマ区切りで複数指定可)
         #[arg(long, env = "RS_LINKFUSION_REMOTE", value_delimiter = ',')]
@@ -377,12 +383,14 @@ async fn async_main(command: Command, power_profile: PowerProfile) -> Result<()>
             let accel = parse_accel_backend(effective_accel(power_profile, &accel))?;
             run_connect(listen, remote, remote_port, key, accel).await?;
         }
+        #[cfg(feature = "tun-gateway")]
         Command::GatewayServe { bind, tun_addr, tun_prefix, mtu, key, qos_config, accel } => {
             let key = decode_hex_key(&key)?;
             let qos = load_qos(qos_config.as_deref())?;
             let accel = parse_accel_backend(effective_accel(power_profile, &accel))?;
             run_gateway_serve(bind, tun_addr, tun_prefix, mtu, key, qos, accel).await?;
         }
+        #[cfg(feature = "tun-gateway")]
         Command::GatewayConnect { remote, remote_port, tun_addr, tun_prefix, mtu, key, qos_config, accel } => {
             let key = decode_hex_key(&key)?;
             let qos = load_qos(qos_config.as_deref())?;
@@ -500,6 +508,7 @@ async fn run_connect(
 /// TUNゲートウェイ・リモート側。1接続のみを受け付け、TUNデバイスと
 /// ボンディング接続の間でIPパケットを中継する(複数クライアント同時
 /// 接続時のパケット混線防止は未実装、単一クライアント前提の設計)。
+#[cfg(feature = "tun-gateway")]
 async fn run_gateway_serve(
     bind: SocketAddr,
     tun_addr: Ipv4Addr,
@@ -543,6 +552,7 @@ async fn run_gateway_serve(
 /// 接続そのものの再確立」。再試行間隔はRS-SmartTCPの
 /// `AdaptivePolicy`(実測RTT/ジッターに基づくFast/Slow判定)に従って
 /// 自動調整される(光回線級なら短い間隔、通常回線なら保守的な間隔)。
+#[cfg(feature = "tun-gateway")]
 async fn run_gateway_connect(
     remote: Vec<String>,
     remote_port: u16,

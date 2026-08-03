@@ -27,12 +27,11 @@ chacha20 = "0.9"
 poly1305 = "0.8"
 subtle = "2"
 rand = "0.8"
-tun-rs = { version = "2", features = ["async_tokio"] }
+tun-rs = { version = "2", features = ["async_tokio"], optional = true }
 ndt7-client = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-network-interface = "2"
 simple-dns = "0.9"
 toml = "0.8"
 eframe = { version = "0.32", optional = true }
@@ -43,9 +42,23 @@ opencuda-core = { path = "../open-cuda/crates/opencuda-core" }
 opencuda-directx = { path = "../open-cuda/crates/opencuda-directx", optional = true, features = ["real-dx12"] }
 
 [features]
-default = []
+default = ["tun-gateway"]
 gpu = ["opencuda-directx"]
 gui = ["dep:eframe", "dep:egui"]
+# TUN(`gateway-serve`/`gateway-connect`)対応。`tun-rs`はAndroidターゲット
+# 向けの`DeviceBuilder`実装を持たない(2026-08-01 HANDOFF参照)ため、
+# `--no-default-features`でこの機能を外せば、TUNを使わない`serve`/
+# `connect`(単純なポートフォワーディング・ボンディング、`agg_tcp`経由)
+# のみのAndroidクロスビルドが可能になる(2026-08-03追記)。
+tun-gateway = ["dep:tun-rs"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+
+# `network-interface`はgetifaddrs/freeifaddrs(glibc/BSD API)にリンクする
+# ため、Bionic libcにこれをエクスポートしていないAndroidターゲットでは
+# リンクエラーになる(2026-08-03発見、`src/speedtest.rs`のAndroid向け
+# `/proc/net/dev`ベースのフォールバックとセットで対応)。Android以外の
+# ターゲットでのみ依存する。
+[target.'cfg(not(target_os = "android"))'.dependencies]
+network-interface = "2"

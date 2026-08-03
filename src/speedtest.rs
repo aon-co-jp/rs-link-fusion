@@ -82,6 +82,7 @@ pub struct NetworkEnvironment {
     pub interface_names: Vec<String>,
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn detect_environment() -> Result<NetworkEnvironment> {
     use network_interface::NetworkInterfaceConfig;
     let interfaces =
@@ -116,6 +117,33 @@ pub fn detect_environment() -> Result<NetworkEnvironment> {
         other_count,
         interface_names: names,
     })
+}
+
+/// Android向けフォールバック(2026-08-03追記): `network-interface`crateは
+/// `getifaddrs`/`freeifaddrs`(glibc/BSD API)をリンクしようとするが、
+/// AndroidのBionic libcはこれをエクスポートしておらず、Androidターゲット
+/// ではリンクエラーになる(`rs-link-fusion/CLAUDE.md`の
+/// `tun-rs`非対応と同じ「サードパーティcrateがAndroidを想定していない」
+/// 種類の問題)。`/proc/net/dev`(Linuxカーネルの標準インターフェース、
+/// Androidも内部Linuxカーネルのためroot不要で読み取り可能)の1行目が
+/// インターフェース名のみを含むことを利用し、依存無しで名前一覧だけを
+/// 抽出する簡易実装。**正直な開示**: Ethernet/WiFi種別の判定
+/// (`classify_interface_name`)は行わない(`/proc/net/dev`単体では
+/// 種別を判別できる情報が無いため)——`other_count`にまとめて計上する。
+#[cfg(target_os = "android")]
+pub fn detect_environment() -> Result<NetworkEnvironment> {
+    let content = std::fs::read_to_string("/proc/net/dev").unwrap_or_default();
+    let mut names = Vec::new();
+    for line in content.lines().skip(2) {
+        let Some((name, _)) = line.split_once(':') else { continue };
+        let name = name.trim().to_string();
+        if name.is_empty() || name == "lo" {
+            continue;
+        }
+        names.push(name);
+    }
+    let other_count = names.len();
+    Ok(NetworkEnvironment { interface_count: names.len(), ethernet_count: 0, wifi_count: 0, other_count, interface_names: names })
 }
 
 /// 1回分の速度測定結果。`label`で「baseline(高速化前)」

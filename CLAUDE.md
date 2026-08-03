@@ -144,6 +144,57 @@ CPUバックエンドのみを実装。
 
 ## HANDOFF
 
+- **2026-08-03 前回エントリ「次にすべきこと(2)」(TUN層を持たない縮小
+  スコープでのAndroid対応可否)に着手、ブロッカーを1段階先へ絞り込み**:
+  1. **`tun-gateway`featureを新設**(既定ON、既存のデスクトップ挙動は
+     無変更): `tun-rs`を`optional`依存にし、`mod tun_gateway`・
+     `GatewayServe`/`GatewayConnect`サブコマンド・その実処理関数を
+     `#[cfg(feature = "tun-gateway")]`で囲んだ。`cargo build
+     --no-default-features`で`tun-rs`(=Android未対応の根本原因)を
+     完全に外せるようになった。
+  2. **`cargo ndk -t aarch64-linux-android build --release
+     --no-default-features`を実行したところ、`tun-rs`起因のエラーは
+     解消し、コンパイル自体は成功、リンク段階で別の新しいエラーに
+     到達**: `aggligator-transport-tcp`(TUNを使わない`serve`/`connect`
+     ボンディング自体が依存する、複数物理インターフェースを実際に
+     束ねるための中核クレート)が`network-interface`crateへ
+     **無条件に**依存しており、その`getifaddrs`/`freeifaddrs`
+     (glibc/BSD API)呼び出しがAndroidのBionic libcにはリンクできず
+     `undefined symbol`でリンク失敗する(`network-interface`v2.0.5の
+     ソースを確認したところ`#[cfg(any(target_os = "android", target_os
+     = "linux"))]`と明記されており、Android向けの分岐自体はあるが、
+     実際にはBionic libcにこれらのシンボルが存在しないため落ちる、
+     という`tun-rs`とは異なる種類の非互換)。
+  3. **自前で`network-interface`を使っていた箇所
+     (`src/speedtest.rs::detect_environment`、ネット速度測定時の
+     インターフェース内訳記録用)は`/proc/net/dev`ベースの依存無し
+     フォールバックに置き換え、`Cargo.toml`で`network-interface`
+     自体を`[target.'cfg(not(target_os = "android"))'.dependencies]`
+     へ移動した**——これでこちらの直接依存は解消したが、
+     `aggligator-transport-tcp`側の依存はこちらの制御が及ばず
+     残ったまま(上記2.のリンクエラーの直接原因)。
+  4. **検証(実測)**: `cargo build`/`cargo test --release`(デフォルト
+     features)19件全green、`cargo test --release
+     --no-default-features`も19件全green(回帰無し)。
+  5. **結論・スコープの絞り込み(正直な開示)**: 「Android対応が
+     一切不可能」だった状態(`tun-rs`の`DeviceBuilder`が根本的に
+     Android非対応)から、「`connect`/`serve`(TUN無し、単純な
+     ポートフォワーディング・ボンディング)は`aggligator-transport-tcp`
+     の`network-interface`依存というただ1点のみが障壁」という、
+     はるかに狭い・対応しやすいブロッカーまで絞り込めた。
+  - 次にすべきこと: (1) `aggligator-transport-tcp`側の
+    `network-interface`依存を回避する方法の検討——選択肢は
+    (a) `network-interface`のAndroid対応版へのアップグレード待ち/
+    upstream側へのissue報告、(b) `aggligator-transport-tcp`を
+    フォークして依存を差し替える(メンテナンスコスト増)、
+    (c) Androidでは単一インターフェース(モバイル回線のみ)固定で
+    妥協し、`aggligator-transport-tcp`自体を使わない薄い代替経路を
+    Android専用に実装する、のいずれか。(2) 上記が解決すれば
+    `connect`/`serve`のみのAndroidバイナリが実際に生成できるはずなので、
+    それを実機で動作確認する。(3) 真のTUNベースのVPN機能(`gateway-*`)は
+    引き続き`VpnService`+JNIの大規模な別プロジェクトが必要
+    (変更なし)。
+
 - **2026-08-01 Android NDKクロスビルド可否を実証(ユーザー指示「Android
   対応・複数ドメインバイナリ共有等の残りの横断バックログを行なう」、
   `open-raid-z/CLAUDE.md`の段階的着手方針「2. まだNDKクロスビルド自体を

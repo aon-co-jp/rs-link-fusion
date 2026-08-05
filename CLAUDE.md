@@ -100,7 +100,7 @@ CPUバックエンドのみを実装。
 | Windows | 今回の主要ターゲット。`install.ps1`想定(未作成) |
 | Linux | 今回の主要ターゲット。`install.sh`想定(未作成) |
 | macOS | **計画のみ**——Mac実機購入後に着手する前提(ユーザー確認済み)。インストーラー部分だけ別設計にする方針(ユーザー指示) |
-| Android | **計画のみ**——Rust+Android NDKでのクロスビルドは技術的に可能性ありと考えられるが、本セッションではツールチェーン未確認・未着手 |
+| Android | **`serve`/`connect`(TUN無し)のみビルド成功・APK生成済み(2026-08-05)**——`gateway-*`(TUNフルVPN)はAndroidのVpnServiceモデル非対応のため引き続き対象外。実機のUSB-Ethernetアダプタが無くWiFi+USB-Ethernet同時ボンディングの実機検証は未実施、`CAP_NET_RAW`権限の要否も未検証(詳細はHANDOFF参照) |
 | iPhone/iPad(iOS/iPadOS) | **計画のみ**——ビルドにXcode(Mac必須)が必要、macOS対応と同じ制約 |
 | スマートTV/4K TV | **計画のみ、スコープ判断を保留**。ユーザー指摘の通りLAN+WiFiを両方持つTVでは技術的にボンディングは意味を持ちうるが、「回線冗長化は本来ルーター/PC側で行うもの」という観点との整合、および対応OS(Android TV/Tizen/webOS)ごとのツールチェーン差異は次回セッションで要検討 |
 
@@ -143,6 +143,120 @@ CPUバックエンドのみを実装。
   次回セッションでの着手事項として記録。
 
 ## HANDOFF
+
+- **2026-08-05 Android版ビルドブロッカーを解消しAndroidアプリシェルを新規実装
+  (ユーザー指示「WiFi回線とUSB有線LANアダプタの2回線を同時にボンディング
+  したい」、前回HANDOFF「次にすべきこと(1)」への対応)**:
+  1. **真の根本原因を実機ビルドで特定(推測ではない)**: 前回HANDOFFの
+     仮説一覧(a〜c)のうち、実際に効いたのは(b)に近い形——
+     `aggligator-transport-tcp`本体が依存する`network-interface` crate
+     (v2.0.5)のソース(`~/.cargo/registry/src/.../network-interface-2.0.5/
+     src/target/linux.rs`)を直接確認したところ、`NetworkInterface::show()`
+     が`#[cfg(any(target_os = "android", target_os = "linux"))]`という
+     Android向け分岐の中で`getifaddrs()`/`freeifaddrs()`(glibc/BSD API)を
+     呼んでおり、これがBionic libcにリンクできず`undefined symbol:
+     getifaddrs`でリンク失敗することを`cargo ndk -t aarch64-linux-android
+     build --release --no-default-features`の実行結果で確認した。
+  2. **解決策(c)寄りの対応を採用——`network-interface`をローカルフォーク
+     しAndroid向け代替実装に差し替え**: crates.io版をコピーし
+     `vendor/network-interface/`として同梱、`src/target/linux.rs`に
+     `#[cfg(target_os = "android")] mod android { ... }`を新設。
+     `getifaddrs`を一切呼ばず、(a) `/proc/net/dev`からインターフェース名を
+     列挙、(b) 自前定義した`ifreq`構造体(`libc`crateはlinux_like全般で
+     `ifreq`を公開していないため、Linuxカーネルabiに合わせて手動定義)+
+     生の`ioctl(SIOCGIFADDR/SIOCGIFFLAGS)`呼び出しでIPv4アドレス・
+     ループバックフラグを取得する方式に置き換えた。**正直な制約**:
+     IPv6アドレス・MACアドレス・ブロードキャストアドレスは取得しない
+     (IPv4のみ)——WiFi/USB-Ethernetのボンディング用途ではIPv4のみで
+     実用上十分と判断し、過剰実装を避けた。`Cargo.toml`に
+     `[patch.crates-io] network-interface = { path = "vendor/network-
+     interface" }`を追加(全ターゲット・全依存元に適用されるが、
+     非Android側の`show()`実装は無変更のため挙動は変わらない)。
+  3. **重要な追加の正直な開示(実機検証の限界)**: `aggligator-transport-
+     tcp`の出力方向の接続確立(`TcpConnector::connect`)は
+     `util::bind_socket_to_interface`→`socket.bind_device(Some(interface))`
+     (`SO_BINDTODEVICE`)を**Android/Linux/Fuchsiaでは常に**使う設計
+     (`aggligator-transport-tcp-0.2.5/src/util.rs`86行目、ソースで確認済み)。
+     `SO_BINDTODEVICE`の設定にはLinuxカーネル上`CAP_NET_RAW`権限が
+     必要——一般の(root化していない)Androidアプリはこの権限を持たない
+     ため、**インターフェース列挙自体(今回解決した部分)は成功しても、
+     実際に2つ目以降のインターフェースへ`bind_device`で結び付けて
+     ボンディングリンクを張る部分は、非rootのAndroid実機では`EPERM`で
+     失敗する可能性が高い**(この開発環境には実機が無いため実際の
+     エラーコードは未確認、Linuxカーネルのケーパビリティ仕様からの
+     推測に基づく正直な懸念として明記する)。これが事実であれば、
+     Android版の複数インターフェース同時ボンディングは追加の対応
+     (root化端末専用にする、またはAndroidの`Network.bindSocket()`相当を
+     `rs-linkfusion`本体に統合できるよう別途プロトコルを設計する等)が
+     次回以降必要になる、という重要な未解決課題として記録する。
+  4. **ビルド実証(実機ビルド、型チェックのみではない)**: `cargo ndk -t
+     aarch64-linux-android build --release --no-default-features`・
+     `-t armv7-linux-androideabi`・`-t x86_64-linux-android`の3ターゲット
+     すべてでリンク成功まで確認した(以前は全ターゲットでリンクエラー
+     だった状態から前進)。デスクトップ側の`cargo build --release`・
+     `cargo test --release`(19件全green、回帰無し)も引き続き成功する
+     ことを確認し、今回のパッチが非Androidターゲットの挙動を変えて
+     いないことを実証した。
+  5. **Androidアプリシェルを新規実装(`android/`)**: `open-easy-web/
+     android`・`open-web-server/android`と同じ設計パターン(単一Activity、
+     `cargo ndk`でクロスビルドしたネイティブバイナリを`jniLibs`配下に
+     `libRSLinkFusion`相当の名前(`librslinkfusion.so`)で同梱、
+     `ProcessBuilder`で起動)。**スコープはユーザー指示通り`serve`/
+     `connect`(TUN無し、ポート転送モード)のみ**——同梱バイナリは
+     `--no-default-features`(`tun-gateway`feature無し)でビルドしたもの。
+     - `MainActivity.kt`: モード選択(`connect`/`serve`)・鍵入力
+       (`generate-key`ボタンで生成)・アドレス入力・起動/停止ボタン。
+       `rs-linkfusion`自体はHTTPサーバーではなく`/healthz`相当が無い
+       ため、起動確認は`connect`モードならローカルリスンアドレスへの
+       実TCP接続試行、`serve`モードならプロセス生存確認
+       (`Process.isAlive`)という代替手段で行う設計にした(正直な設計
+       上の妥協点として明記)。
+     - `NetworkBinder.kt`: `ConnectivityManager.requestNetwork()`で
+       `TRANSPORT_WIFI`・`TRANSPORT_ETHERNET`の両方を同時要求・保持し、
+       `getLinkProperties(network).interfaceName`で実際のインター
+       フェース名(`wlan0`/`eth0`等)を画面に表示する。**正直な開示・
+       意図的なスコープ限定**: `Network.bindSocket()`はこのJVMプロセス
+       内のソケットにしか効かず、別プロセス(`ProcessBuilder`で起動した
+       ネイティブバイナリ)のソケットには適用できないため、今回の実装は
+       「両ネットワークが実際に存在し使えること」の確認・表示に留め、
+       プロセス間でのソケットFD受け渡しやVpnServiceラップのような
+       過剰実装は行っていない(`rs-linkfusion`本体は上記2.の
+       `NetworkInterface::show()`経由で両インターフェースを自動列挙・
+       使用する既存の`multi_interface`設計にそのまま委ねる)。
+  6. **Gradleビルド実証**: `gradle :app:assembleDebug --offline`
+     **BUILD SUCCESSFUL**(arm64-v8a+x86_64両ABIの`librslinkfusion.so`
+     〈約12.9MB/13.4MB、ストリップ不可のため未ストリップのまま同梱、
+     ビルドログに"Unable to strip"警告あり・実害無し〉を含む
+     `app-debug.apk`が実際に生成されることを確認、`unzip -l`で
+     `lib/arm64-v8a/librslinkfusion.so`・`lib/x86_64/librslinkfusion.so`
+     の実在を確認済み)。
+  7. **正直な開示・未検証事項(誇張しない)**: (a) この開発環境には
+     実機のUSB-Ethernetアダプタが無いため、WiFi+USB-Ethernet同時
+     ボンディングの実機E2E検証は一切行っていない。(b) 実機/エミュレータ
+     での起動確認自体(`adb install`→タップ→ログ確認)もこのパスでは
+     未実施——ビルド成功の確認までに留まる。(c) 上記3.の`CAP_NET_RAW`
+     懸念が実際にどう現れるか(`bind_device`が本当に`EPERM`を返すか、
+     一部Android実装では緩和されているか)は未検証。(d) `NetworkBinder`
+     が返す実際のインターフェース名(`wlan0`/`eth0`等)が、`rs-linkfusion`
+     本体側の`NetworkInterface::show()`(今回パッチしたAndroid実装)が
+     `/proc/net/dev`から取得する名前と一致するかどうかの突き合わせ確認も
+     未実施。
+  8. **本項目クローズ時の再検証(2026-08-05続き)**: デスクトップ側
+     `cargo test --release`を改めて実行し、19件全green・回帰無しを
+     再確認した(上記4.の主張の裏取り)。`android/`ビルド成果物
+     (`app-debug.apk`等)自体の再ビルドはこのセッションでは行って
+     いない——上記6.の検証結果(BUILD SUCCESSFUL)を追加検証なしで
+     引き継いでいる点に留意。
+  - 次にすべきこと: (1) root化済みAndroid実機(またはCAP_NET_RAW付与
+    済みのカスタムROM/システムアプリ)での実際の複数インターフェース
+    ボンディング動作確認(上記3.の懸念の実証・反証)、(2) 非root実機での
+    「WiFiのみ」「USB-Ethernetのみ」それぞれ単一インターフェースでの
+    `connect`/`serve`動作確認(こちらは`bind_device`の対象インターフェース
+    が1つのみでも、そもそも`set_interface_filter`等で単一に絞る運用が
+    現実的な代替策になりうる、要検討)、(3) `NetworkBinder`が検知した
+    実際のインターフェース名と本体側列挙結果の突き合わせ、(4) 実機での
+    `adb install`→起動→ログ確認、(5) GUI/フォアグラウンドサービス化・
+    APK署名配布は引き続きスコープ外。
 
 - **2026-08-03 前回エントリ「次にすべきこと(2)」(TUN層を持たない縮小
   スコープでのAndroid対応可否)に着手、ブロッカーを1段階先へ絞り込み**:

@@ -3,6 +3,33 @@
 他のプロジェクトへそのまま(または軽微な変更で)移植できる実装パターン
 一覧。
 
+## Android向け`network-interface`代替実装(`vendor/network-interface/src/target/linux.rs`、2026-08-05)
+
+crates.io版`network-interface`(v2.0.5)の`NetworkInterface::show()`は
+Android向け分岐を持つが、実際には`getifaddrs`/`freeifaddrs`(glibc/BSD
+API)を呼んでおりBionic libcにリンクできず`undefined symbol`でリンク
+失敗する。これは`aggligator-transport-tcp`のような、複数ネットワーク
+インターフェースを列挙する既存クレートをAndroidへ移植する際に共通して
+ぶつかる障壁であるため、対応パターンとして記録する。
+
+回避策: `getifaddrs`を一切使わず、(1) `/proc/net/dev`からインター
+フェース名を列挙、(2) `libc`crateが`ifreq`をlinux_like全般で公開して
+いないため自前定義した`ifreq`構造体+生の`ioctl(SIOCGIFADDR/
+SIOCGIFFLAGS)`でIPv4アドレス・ループバックフラグを取得する
+`#[cfg(target_os = "android")]`専用実装に差し替える。`Cargo.toml`の
+`[patch.crates-io]`でこのローカルフォークへ全体を向ければ、依存元
+クレート(`aggligator-transport-tcp`等)のソース自体には手を入れずに
+Android対応できる。
+
+**移植時の正直な制約**: IPv6アドレス・MACアドレス・ブロードキャスト
+アドレスは取得しない(IPv4のみ)。WiFi/USB-Ethernetボンディングのような
+IPv4で足りる用途への適用に限定して判断すること。また、
+`aggligator-transport-tcp`の接続確立(`bind_device`/`SO_BINDTODEVICE`)
+はLinuxカーネル上`CAP_NET_RAW`権限を要求するため、この代替実装で
+インターフェース列挙自体が通っても、非root Android実機では
+`bind_device`側が`EPERM`で別途失敗する可能性が残る(未検証、
+`rs-link-fusion/CLAUDE.md`のHANDOFF 2026-08-05参照)。
+
 ## `aggligator`によるユーザー空間マルチホーミング(`src/main.rs`)
 
 `aggligator-transport-tcp::simple::{tcp_connect, tcp_server}`は、

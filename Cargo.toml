@@ -62,3 +62,16 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # ターゲットでのみ依存する。
 [target.'cfg(not(target_os = "android"))'.dependencies]
 network-interface = "2"
+
+# `aggligator-transport-tcp`自身が`network-interface`へ無条件依存して
+# おり(feature gate無し)、その`local_interfaces()`実装が呼ぶ
+# `getifaddrs`/`freeifaddrs`(glibc/BSD API)がBionic libcにリンク
+# できないため、Androidターゲットでは自分の直接依存を外すだけでは
+# 解決しない(2026-08-05発見)。`vendor/network-interface`へ
+# `network-interface` v2.0.5をローカルフォークし、Android向けのみ
+# `/proc/net/dev`+`SIOCGIFADDR`ioctlベースの代替実装
+# (`src/target/linux.rs`の`android`モジュール)に差し替えた上で、
+# crates.io版全体をこのパスへパッチする(全ターゲット・全依存元に
+# 適用される。非Android側の挙動は元のgetifaddrs実装のまま変更無し)。
+[patch.crates-io]
+network-interface = { path = "vendor/network-interface" }

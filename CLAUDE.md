@@ -144,6 +144,93 @@ CPUバックエンドのみを実装。
 
 ## HANDOFF
 
+- **2026-08-07 非root Android実機(moto g53y 5G、root化なし)でCAP_NET_RAW
+  無しでのボンディング確立の実挙動を検証(前回HANDOFF「次にすべきこと(1)」
+  への部分対応——root化実機ではなく非root実機での検証、ユーザー指示)**:
+  1. **実機接続確認**: `adb devices`で`ZY22J7RFND moto_g53y_5G`(root化
+     されていない一般端末)を確認。`android/app/build/outputs/apk/debug/
+     app-debug.apk`を`adb install -r`で実インストール(BUILD SUCCESSFULの
+     再検証も兼ねる、パッケージ名`tokyo.runo.rslinkfusion`)。
+  2. **アプリシェルのUI実機起動確認**: `MainActivity`を起動し
+     `uiautomator dump`でUI階層を実取得。`networkStatusText`が
+     「WiFi: ✅ (wlan0) / Ethernet(USB-LAN): ❌
+     (未接続、またはこの端末はUSB-Ethernet未対応)」と実際に表示され、
+     `NetworkBinder.kt`の`ConnectivityManager.requestNetwork()`が
+     実機で意図通りWiFi(`wlan0`)を検知していることを確認
+     (USB-Ethernetアダプタ自体はこの検証でも用意できなかったため、
+     前回HANDOFFの限界(7)(a)は未解消のまま)。
+  3. **CAP_NET_RAW欠如の直接証拠(推測ではなく実機の`/proc/self/status`で
+     確認)**: `adb shell run-as tokyo.runo.rslinkfusion`(デバッグビルド
+     のためアプリと同一UIDでシェルコマンドを実行可能)で
+     `cat /proc/self/status`を実行した結果、`CapEff: 0000000000000000`・
+     `CapPrm: 0000000000000000`(実効・許可capabilityが完全にゼロ)、
+     `id`コマンドでは`groups=...,3001(net_bt_admin),3002(net_bt),
+     3003(inet),...`のみで`net_raw`グループは含まれない、ことを確認した。
+     一般Androidアプリ(root無し、`android.permission.*`の宣言のみで
+     Linuxケーパビリティは付与不可)がCAP_NET_RAWを一切持たないことを、
+     推測ではなくこの実機のカーネルインターフェースから直接実証した。
+  4. **`connect`/`serve`サブコマンドの実際の挙動を直接検証(UIではなく
+     `run-as`でネイティブバイナリ〈`librslinkfusion.so`〉を直接実行し、
+     クリーンな引数で検証——UI経由の`EditText`はこの端末のIME
+     〈日本語ロケール〉が半角数字・ピリオドを自動的に全角
+     〈１２７．０．０．１〉へ変換してしまう既知の実機特有の問題に
+     ぶつかり、IME切替〈Gboard/Latin〉を試しても改善せず、UI入力
+     経由でのクリーンな検証を断念しCLI直接実行に切り替えた、という
+     副次的な発見も記録しておく)**:
+     - `generate-key`は問題無く実行でき鍵を生成(ネイティブ実行自体に
+       障害が無いことを確認)。
+     - `serve --bind 127.0.0.1:19501 --target 127.0.0.1:19502`と
+       `connect --listen 127.0.0.1:19801 --remote 127.0.0.1
+       --remote-port 19501`を同一実機上で(`RUST_LOG=trace`付きで)
+       起動したところ、**両プロセスとも「starting bonded tunnel
+       server/client」という起動ログ1行を出力した直後、15秒以上
+       待っても後続のログが一切出ないまま停止したように見える状態に
+       陥った**。`connect`側のローカル待受ポート(`127.0.0.1:19801`)へ
+       `nc`で接続を試みたが`timeout`(戻り値124、接続不可)——ローカル
+       リスナーすら開かれていないことを確認した。
+     - **正直な開示・未解決の限界**: `aggligator-transport-tcp-0.2.5/
+       src/util.rs`(86〜91行目)のソースを読むと、`bind_socket_to_
+       interface()`はAndroid/Linux/Fuchsiaで無条件に
+       `socket.bind_device(Some(interface))`(`SO_BINDTODEVICE`)を
+       呼ぶ設計であることを改めて確認したが、**この呼び出しが実際に
+       返す`EPERM`等のエラーメッセージそのものは、今回のログ出力
+       (`RUST_LOG=trace`含む)には一切現れなかった**——アプリ本体の
+       `tracing`初期化(`main.rs`の`tracing_subscriber::fmt::init()`)
+       がaggligator内部のリトライ/再接続ループ内で発生するエラーを
+       INFO/TRACEレベルで表に出していないか、aggligator側が
+       `bind_device`失敗を静かに握り潰して次のインターフェース候補
+       (この場合`lo`ループバックのみが対象になる可能性が高い、ソース
+       の`interface_names_for_target()`はターゲットのloopback/非
+       loopback一致でフィルタするため)へ延々とリトライし続けている
+       ものと推測されるが、**実際の生の`EPERM`errno文字列を捕捉する
+       ことはできなかった**(`strace`がこの端末に存在せず、
+       システムコールレベルでの直接確認は断念)。
+  5. **総合結論(正直な開示)**: 「CAP_NET_RAW無しの非root実機では
+     `bind_device`が実際に`EPERM`を返す可能性が高い」という前回の
+     推測を裏付ける状況証拠(実効capabilityゼロという実機での直接確認、
+     および`connect`/`serve`が起動ログ1行のまま先に進まずローカル
+     リスナーすら開かれないという実際の異常動作)は得られたが、
+     「エラーメッセージの内容そのもの」を実機ログから直接確認する
+     ところまでは到達できなかった、という部分的な検証結果である。
+     次回、(a) `strace`が使える端末、または(b)
+     aggligator/aggligator-transport-tcp側のログレベルをより詳細に
+     出す変更(`bind_device`呼び出し箇所に`tracing::warn!`等を追加した
+     フォーク版を一時的に使う)、のいずれかで真因を追加特定する必要が
+     ある。
+  - 次にすべきこと: (1) 上記4.で判明した`bind_device`失敗の生ログを
+    取得する追加調査(`strace`対応端末の確保、またはログ追加パッチの
+    一時適用)、(2) root化済み実機またはCAP_NET_RAW付与済み環境での
+    比較検証(同じ手順で「起動ログ1行のまま止まる」異常が解消し実際に
+    ボンディングが確立するかの反証実験)、(3) 実機のUSB-Ethernet
+    アダプタ確保によるWiFi+USB-Ethernet同時ボンディングの実機E2E検証
+    (前回からの持ち越し、今回も未解決)、(4) 非root実機での
+    「WiFiのみ」等単一インターフェース固定運用(前回HANDOFFの
+    次にすべきこと(2))の検証——今回の結果(`connect`/`serve`が
+    ループバック単体構成でも進まない)を踏まえると、単一インター
+    フェース固定であってもAndroid上の`bind_device`自体が障壁になる
+    可能性が高く、この対応策の有効性にも疑問符が付く、という新たな
+    懸念を追記しておく。
+
 - **2026-08-05 Android版ビルドブロッカーを解消しAndroidアプリシェルを新規実装
   (ユーザー指示「WiFi回線とUSB有線LANアダプタの2回線を同時にボンディング
   したい」、前回HANDOFF「次にすべきこと(1)」への対応)**:

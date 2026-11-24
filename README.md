@@ -1,3 +1,5 @@
+> Latest translations / 翻訳の最新版: [0-LATEST-TRANSLATIONS.md](0-LATEST-TRANSLATIONS.md)
+
 # RS-Link-Fusion
 
 (旧名`RS-LinkFusion`→2026-07-31に`rs-link-fusion`〈GitHubリポジトリ名〉/

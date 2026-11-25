@@ -244,3 +244,7 @@ tokio::try_join!(to_agg, to_local)?;
 - **WASM по-прежнему остаётся технологией для интерфейса.** Изменилось лишь то, что вызываемый им API теперь построен на Connect.
 - Интерфейсы, форма которых задана внешним стандартом (ACME, обратные вызовы OAuth, вебхуки сторонних сервисов, проверки работоспособности, статические файлы, OTLP), остаются обычным HTTP.
 - **Если есть сомнения — выбирайте Connect.**
+
+## 2026-11-25 url 2.5.9 (RUSTSEC-2026-0592)
+- 日本語: `url` を 2.5.9 へ更新(入れ子の `blob:` URL で `Url::origin()` がスタック溢れする脆弱性)。試験19件成功。aggligator・eframe/egui・rand 0.10 などのメジャー更新は、API の書き換えと複数NICの実機確認が要るため見送りを継続。
+- English: bumped `url` to 2.5.9 (stack overflow in `Url::origin()` on nested `blob:` URLs). 19 tests pass. The major updates (aggligator, eframe/egui, rand 0.10, ...) stay deferred: they need API rewrites and multi-NIC real-device checks.
